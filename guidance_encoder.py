@@ -67,13 +67,6 @@ class GuidanceEncoder(ModelMixin):
 
         attention_channel_out = block_out_channels[-1]
         self.guidance_attention = Transformer3DModel(
-            attention_num_heads,
-            attention_channel_out // attention_num_heads,
-            attention_channel_out,
-            norm_num_groups=32,
-            unet_use_cross_frame_attention=False,
-            unet_use_temporal_attention=False,
-        )
 
         self.conv_out = zero_module(
             InflatedConv3d(
