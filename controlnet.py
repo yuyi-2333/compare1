@@ -213,6 +213,38 @@ class ControlNetModel(ModelMixin, ConfigMixin):
             controlnet_conditioning_channel_order=controlnet_conditioning_channel_order,
             conditioning_embedding_out_channels=conditioning_embedding_out_channels,
         )
+ock = zero_module(controlnet_block)
+        self.controlnet_down_blocks.append(controlnet_block)
+
+        for i, down_block_type in enumerate(down_block_types):
+            input_channel = output_channel
+            output_channel = block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+
+            down_block = get_down_block(
+                down_block_type,
+                num_layers=layers_per_block,
+                in_channels=input_channel,
+                out_channels=output_channel,
+                temb_channels=time_embed_dim,
+                add_downsample=not is_final_block,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                resnet_groups=norm_num_groups,
+                cross_attention_dim=cross_attention_dim,
+                num_attention_heads=attention_head_dim[i],
+                downsample_padding=downsample_padding,
+                use_linear_projection=use_linear_projection,
+                only_cross_attention=only_cross_attention[i],
+                upcast_attention=upcast_attention,
+                resnet_time_scale_shift=resnet_time_scale_shift,
+            )
+            self.down_blocks.append(down_block)
+
+            for _ in range(layers_per_block):
+                controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+                controlnet_block = zero_module(controlnet_block)
+                self.controlnet_down_blocks.append(controlnet_block)
 
         if load_weights_from_unet:
             controlnet.conv_in.load_state_dict(unet.conv_in.state_dict())
