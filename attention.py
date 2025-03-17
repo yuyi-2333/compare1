@@ -45,7 +45,104 @@ else:
     xformers = None
 
 
-class Transformer3DModel(ModelMixin, ConfigMixin):
+cl
+
+        if cross_attention_dim is not None:
+            self.norm2 = AdaLayerNorm(dim, num_embeds_ada_norm) if self.use_ada_layer_norm else nn.LayerNorm(dim)
+        else:
+            self.norm2 = None
+
+        # Feed-forward
+        self.ff = FeedForward(dim, dropout=dropout, activation_fn=activation_fn)
+        self.norm3 = nn.LayerNorm(dim)
+        self.use_ada_layer_norm_zero = False
+        
+        # Temp-Attn
+        assert unet_use_temporal_attention is not None
+        if unet_use_temporal_attention:
+            self.attn_temp = CrossAttention(
+                query_dim=dim,
+                heads=num_attention_heads,
+                dim_head=attention_head_dim,
+                dropout=dropout,
+                bias=attention_bias,
+                upcast_attention=upcast_attention,
+            )
+            nn.init.zeros_(self.attn_temp.to_out[0].weight.data)
+            self.norm_temp = AdaLayerNorm(dim, num_embeds_ada_norm) if self.use_ada_layer_norm else nn.LayerNorm(dim)
+
+    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, *args, **kwargs):
+        if not is_xformers_available():
+            print("Here is how to install it")
+            raise ModuleNotFoundError(
+                "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
+                " xformers",
+                name="xformers",
+            )
+        elif not torch.cuda.is_available():
+            raise ValueError(
+                "torch.cuda.is_available() should be True but is False. xformers' memory efficient attention is only"
+                " available for GPU "
+            )
+        else:
+            try:
+                # Make sure we can run the memory efficient attention
+                _ = xformers.ops.memory_efficient_attention(
+                    torch.randn((1, 2, 40), device="cuda"),
+                    torch.randn((1, 2, 40), device="cuda"),
+                    torch.randn((1, 2, 40), device="cuda"),
+                )
+            except Exception as e:
+                raise e
+            self.attn1._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
+            if self.attn2 is not None:
+                self.attn2._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
+            # self.attn_temp._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
+
+    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None):
+        # SparseCausal-Attention
+        norm_hidden_states = (
+            self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)
+        )
+
+        # if self.only_cross_attention:
+        #     hidden_states = (
+        #         self.attn1(norm_hidden_states, encoder_hidden_states, attention_mask=attention_mask) + hidden_states
+        #     )
+        # else:
+        #     hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask, video_length=video_length) + hidden_states
+
+        # pdb.set_trace()
+        if self.unet_use_cross_frame_attention:
+            hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask, video_length=video_length) + hidden_states
+        else:
+            hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask) + hidden_states
+
+        if self.attn2 is not None:
+            # Cross-Attention
+            norm_hidden_states = (
+                self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
+            )
+            hidden_states = (
+                self.attn2(
+                    norm_hidden_states, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+                )
+                + hidden_states
+            )
+
+        # Feed-forward
+        hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
+
+        # Temporal-Attention
+        if self.unet_use_temporal_attention:
+            d = hidden_states.shape[1]
+            hidden_states = rearrange(hidden_states, "(b f) d c -> (b d) f c", f=video_length)
+            norm_hidden_states = (
+                self.norm_temp(hidden_states, timestep) if self.use_ada_layer_norm else self.norm_temp(hidden_states)
+            )
+            hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
+            hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
+ass Transformer3DModel(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
         self,
@@ -220,101 +317,4 @@ class BasicTransformerBlock(nn.Module):
             )
         else:
             self.attn2 = None
-
-        if cross_attention_dim is not None:
-            self.norm2 = AdaLayerNorm(dim, num_embeds_ada_norm) if self.use_ada_layer_norm else nn.LayerNorm(dim)
-        else:
-            self.norm2 = None
-
-        # Feed-forward
-        self.ff = FeedForward(dim, dropout=dropout, activation_fn=activation_fn)
-        self.norm3 = nn.LayerNorm(dim)
-        self.use_ada_layer_norm_zero = False
-        
-        # Temp-Attn
-        assert unet_use_temporal_attention is not None
-        if unet_use_temporal_attention:
-            self.attn_temp = CrossAttention(
-                query_dim=dim,
-                heads=num_attention_heads,
-                dim_head=attention_head_dim,
-                dropout=dropout,
-                bias=attention_bias,
-                upcast_attention=upcast_attention,
-            )
-            nn.init.zeros_(self.attn_temp.to_out[0].weight.data)
-            self.norm_temp = AdaLayerNorm(dim, num_embeds_ada_norm) if self.use_ada_layer_norm else nn.LayerNorm(dim)
-
-    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, *args, **kwargs):
-        if not is_xformers_available():
-            print("Here is how to install it")
-            raise ModuleNotFoundError(
-                "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
-                " xformers",
-                name="xformers",
-            )
-        elif not torch.cuda.is_available():
-            raise ValueError(
-                "torch.cuda.is_available() should be True but is False. xformers' memory efficient attention is only"
-                " available for GPU "
-            )
-        else:
-            try:
-                # Make sure we can run the memory efficient attention
-                _ = xformers.ops.memory_efficient_attention(
-                    torch.randn((1, 2, 40), device="cuda"),
-                    torch.randn((1, 2, 40), device="cuda"),
-                    torch.randn((1, 2, 40), device="cuda"),
-                )
-            except Exception as e:
-                raise e
-            self.attn1._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
-            if self.attn2 is not None:
-                self.attn2._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
-            # self.attn_temp._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
-
-    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None):
-        # SparseCausal-Attention
-        norm_hidden_states = (
-            self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)
-        )
-
-        # if self.only_cross_attention:
-        #     hidden_states = (
-        #         self.attn1(norm_hidden_states, encoder_hidden_states, attention_mask=attention_mask) + hidden_states
-        #     )
-        # else:
-        #     hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask, video_length=video_length) + hidden_states
-
-        # pdb.set_trace()
-        if self.unet_use_cross_frame_attention:
-            hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask, video_length=video_length) + hidden_states
-        else:
-            hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask) + hidden_states
-
-        if self.attn2 is not None:
-            # Cross-Attention
-            norm_hidden_states = (
-                self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
-            )
-            hidden_states = (
-                self.attn2(
-                    norm_hidden_states, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
-                )
-                + hidden_states
-            )
-
-        # Feed-forward
-        hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
-
-        # Temporal-Attention
-        if self.unet_use_temporal_attention:
-            d = hidden_states.shape[1]
-            hidden_states = rearrange(hidden_states, "(b f) d c -> (b d) f c", f=video_length)
-            norm_hidden_states = (
-                self.norm_temp(hidden_states, timestep) if self.use_ada_layer_norm else self.norm_temp(hidden_states)
-            )
-            hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
-            hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
-
         return hidden_states
